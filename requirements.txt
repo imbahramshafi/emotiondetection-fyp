@@ -1,0 +1,28 @@
+# Core ML & Computer Vision
+tensorflow>=2.13.0
+keras>=2.13.0
+opencv-python>=4.8.0
+ultralytics>=8.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
+
+# Deep learning tracking
+deep-sort-realtime>=1.3.0
+
+# Data processing
+pandas>=2.0.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# API & web
+fastapi>=0.124.0
+uvicorn>=0.28.0
+python-dotenv>=1.0.0
+
+# Anthropic Claude API
+anthropic>=0.94.0
+
+# Additional utilities
+Pillow>=10.0.0
+requests>=2.31.0
