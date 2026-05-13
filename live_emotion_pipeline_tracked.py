@@ -36,13 +36,20 @@ from collections import defaultdict, deque, Counter
 import argparse
 import threading
 import requests
+import base64
 
 # ------------- ARGUMENT PARSING ------------- #
 parser = argparse.ArgumentParser(description="Tracked emotion detection pipeline")
 parser.add_argument("--input", default=None,
                     help="Video file path (e.g. classroom.mp4). Omit to use webcam.")
+parser.add_argument("--student-cam", type=int, default=1,
+                    help="Camera index for student view (top-down). Default: 1")
+parser.add_argument("--teacher-cam", type=int, default=0,
+                    help="Camera index for teacher view (frontal). Default: 0")
+parser.add_argument("--no-teacher", action="store_true",
+                    help="Disable teacher tracking (single-camera mode)")
 args = parser.parse_args()
-input_source = args.input if args.input is not None else 0
+input_source = args.input if args.input is not None else args.student_cam
 
 # SESSION logging (auto-created per run)
 SESSION_NAME = datetime.now().strftime("session_%Y-%m-%d_%H-%M-%S")
@@ -74,6 +81,12 @@ FACE_PAD = 0.20
 PROCESS_EVERY_N_FRAMES = 4
 PERSIST_FRAMES = 10
 SMOOTHING_WINDOW = 5
+
+# Frame streaming (Option B: base64 JPEG over WebSocket)
+STREAM_FRAMES = True
+FRAME_STREAM_EVERY_N = 3        # 1 of every N frames sent (~10 fps at 30 fps capture)
+FRAME_STREAM_QUALITY = 60       # JPEG quality 1-100
+FRAME_STREAM_WIDTH = 640        # downscale before encoding
 
 # ------------- LOAD MODELS --------------- #
 print("Loading YOLO:", YOLO_WEIGHTS)
@@ -184,14 +197,38 @@ def log_emotion_with_id(frame_number, face_id, label, prob, box):
 # ---------------- LIVE EVENT PUSH ---------------- #
 def _post_event(payload):
     try:
-        requests.post(API_EVENT_URL, json=payload, timeout=0.1)
+        requests.post(API_EVENT_URL, json=payload, timeout=0.5)
     except Exception:
         pass  # api_server not running — silently skip
+
+def push_frame(frame_bgr, camera_name, frame_number):
+    """Encode frame as base64 JPEG and push to API as a frame event."""
+    if API_EVENT_URL is None or not STREAM_FRAMES:
+        return
+    h, w = frame_bgr.shape[:2]
+    if w > FRAME_STREAM_WIDTH:
+        new_h = int(h * FRAME_STREAM_WIDTH / w)
+        frame_bgr = cv2.resize(frame_bgr, (FRAME_STREAM_WIDTH, new_h))
+    ok, buf = cv2.imencode(".jpg", frame_bgr,
+                           [cv2.IMWRITE_JPEG_QUALITY, FRAME_STREAM_QUALITY])
+    if not ok:
+        return
+    b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+    payload = {
+        "type": "frame",
+        "camera": camera_name,
+        "frame": frame_number,
+        "jpeg": f"data:image/jpeg;base64,{b64}",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+    }
+    threading.Thread(target=_post_event, args=(payload,), daemon=True).start()
+
 
 def push_live_event(frame_number, face_id, label, prob):
     if API_EVENT_URL is None:
         return
     payload = {
+        "type":       "student",
         "frame":      frame_number,
         "face_id":    face_id,
         "emotion":    label,
@@ -217,13 +254,27 @@ for _ in range(4):
                  imgsz=IMG_SIZE, conf=CONF_THRES, classes=[0], verbose=False)
 
 # ------------- WEBCAM LOOP ------------- #
+# ----------- START TEACHER TRACKER ----------- #
+teacher_tracker = None
+if not args.no_teacher and args.input is None:
+    from teacher_tracker_module import TeacherTracker
+    teacher_tracker = TeacherTracker(
+        camera_index=args.teacher_cam,
+        api_url=API_EVENT_URL,
+        show_window=True,
+    )
+    teacher_tracker.start()
+    print(f"Teacher tracker started on camera {args.teacher_cam}")
+
 if isinstance(input_source, str):
-    print(f"Input source: file — {input_source}")
+    print(f"Student input source: file — {input_source}")
 else:
-    print("Input source: webcam (index 0)")
+    print(f"Student input source: webcam (index {input_source})")
 cap = cv2.VideoCapture(input_source)
 if not cap.isOpened():
     print(f"Error: could not open input source: {input_source}")
+    if teacher_tracker:
+        teacher_tracker.stop()
     exit()
 
 frame_idx = 0
@@ -266,6 +317,8 @@ try:
             cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.imshow("Tracked Emotion Detection", frame)
+            if frame_idx % FRAME_STREAM_EVERY_N == 0:
+                push_frame(frame, "students", frame_idx)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
             continue
@@ -371,15 +424,21 @@ try:
         cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.imshow("Tracked Emotion Detection", frame)
+        if frame_idx % FRAME_STREAM_EVERY_N == 0:
+            push_frame(frame, "students", frame_idx)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
 finally:
+    if teacher_tracker:
+        teacher_tracker.stop()
     print("\n===== SESSION SUMMARY =====")
     print(f"Log file:          {SESSION_LOG_FILE}")
     print(f"Frames captured:   {frame_idx}")
     print(f"Total detections:  {total_detections}")
     print(f"Unique faces seen: {len(seen_ids)}")
+    if teacher_tracker:
+        print(f"Teacher tracker:   stopped")
     print("===========================\n")
     cap.release()
     cv2.destroyAllWindows()

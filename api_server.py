@@ -66,12 +66,31 @@ async def ws_live(websocket: WebSocket):
 
 
 # ------------------------------
+# Latest teacher state (for polling)
+# ------------------------------
+latest_teacher_state: dict = {}
+
+
+# ------------------------------
 # Internal: receive event from pipeline
 # ------------------------------
 @app.post("/internal/event")
 async def receive_event(event: dict):
+    global latest_teacher_state
+    if event.get("type") == "teacher":
+        latest_teacher_state = event
     await manager.broadcast(event)
     return {"ok": True}
+
+
+# ------------------------------
+# Endpoint: Current teacher state
+# ------------------------------
+@app.get("/teacher/state")
+def get_teacher_state():
+    if not latest_teacher_state:
+        return {"detected": False}
+    return latest_teacher_state
 
 
 # ------------------------------
