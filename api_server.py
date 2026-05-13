@@ -3,8 +3,11 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel, EmailStr
+from sqlalchemy.orm import Session
 import glob
 import os
 import json
@@ -12,7 +15,22 @@ import pandas as pd
 import numpy as np
 import anthropic
 
+from db import init_db, SessionLocal, get_db, User
+from auth import (
+    hash_password, verify_password, create_access_token,
+    get_current_user, seed_admin_if_empty,
+)
+
 app = FastAPI()
+
+# ------------------------------
+# DB init + seed default admin
+# ------------------------------
+init_db()
+_seed_email = os.getenv("ADMIN_EMAIL", "teacher@local")
+_seed_pw = os.getenv("ADMIN_PASSWORD", "changeme")
+with SessionLocal() as _db:
+    seed_admin_if_empty(_db, _seed_email, _seed_pw)
 
 # Allow frontend on any device to connect (React Native needs this)
 app.add_middleware(
@@ -53,6 +71,37 @@ manager = ConnectionManager()
 
 
 # ------------------------------
+# Auth: schemas + endpoints
+# ------------------------------
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+    name: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
+@app.post("/auth/login", response_model=TokenOut)
+def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == form.username).first()
+    if not user or not verify_password(form.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_access_token(user.id, user.email)
+    return TokenOut(access_token=token)
+
+
+@app.get("/auth/me", response_model=UserOut)
+def me(current: User = Depends(get_current_user)):
+    return current
+
+
+# ------------------------------
 # Endpoint: Live WebSocket stream
 # ------------------------------
 @app.websocket("/ws/live")
@@ -87,7 +136,7 @@ async def receive_event(event: dict):
 # Endpoint: Current teacher state
 # ------------------------------
 @app.get("/teacher/state")
-def get_teacher_state():
+def get_teacher_state(_: User = Depends(get_current_user)):
     if not latest_teacher_state:
         return {"detected": False}
     return latest_teacher_state
@@ -97,7 +146,7 @@ def get_teacher_state():
 # Endpoint: Get all session files
 # ------------------------------
 @app.get("/sessions")
-def get_sessions():
+def get_sessions(_: User = Depends(get_current_user)):
     files = sorted(glob.glob(LOGS_GLOB), key=os.path.getctime)
     sessions = [os.path.basename(f) for f in files]
     return {"sessions": sessions}
@@ -107,7 +156,7 @@ def get_sessions():
 # Endpoint: Class summary
 # ------------------------------
 @app.get("/class_summary")
-def class_summary(session: str = Query(...)):
+def class_summary(session: str = Query(...), _: User = Depends(get_current_user)):
     file_path = f"{LOGS_DIR}/{session}"
     if not os.path.exists(file_path):
         return {"error": "Session not found"}
@@ -131,7 +180,7 @@ def class_summary(session: str = Query(...)):
 # Endpoint: Engagement timeline
 # ------------------------------
 @app.get("/timeline")
-def engagement_timeline(session: str = Query(...)):
+def engagement_timeline(session: str = Query(...), _: User = Depends(get_current_user)):
     file_path = f"{LOGS_DIR}/{session}"
     if not os.path.exists(file_path):
         return {"error": "Session not found"}
@@ -153,7 +202,7 @@ def engagement_timeline(session: str = Query(...)):
 # Endpoint: Claude engagement report
 # ------------------------------
 @app.get("/report")
-def engagement_report(session: str = Query(...)):
+def engagement_report(session: str = Query(...), _: User = Depends(get_current_user)):
     file_path = f"{LOGS_DIR}/{session}"
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Session not found")
