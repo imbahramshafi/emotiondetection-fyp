@@ -42,6 +42,9 @@ app.add_middleware(
 )
 
 from shared import calculate_engagement, LOGS_DIR, LOGS_GLOB
+from alerts import AlertEngine
+
+alert_engine = AlertEngine()
 
 # ------------------------------
 # WebSocket connection manager
@@ -129,6 +132,12 @@ async def receive_event(event: dict):
     if event.get("type") == "teacher":
         latest_teacher_state = event
     await manager.broadcast(event)
+
+    # Run alert engine and broadcast any triggered alerts
+    alerts = alert_engine.process_event(event)
+    for alert in alerts:
+        await manager.broadcast(alert)
+
     return {"ok": True}
 
 
@@ -140,6 +149,14 @@ def get_teacher_state(_: User = Depends(get_current_user)):
     if not latest_teacher_state:
         return {"detected": False}
     return latest_teacher_state
+
+
+# ------------------------------
+# Endpoint: Alert engine status
+# ------------------------------
+@app.get("/alerts/status")
+def get_alert_status(_: User = Depends(get_current_user)):
+    return alert_engine.get_status()
 
 
 # ------------------------------
